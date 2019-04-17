@@ -1,0 +1,303 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Re-usable Lambda-ApiGateway Template
+Parameters:
+  Stack:
+    Type: String
+    Description: The name of the application stack
+  SubStack:
+    Type: String
+    Description: The sub-label of the application stack
+  Tier:
+    Type: String
+    Description: Tier to deploy
+  VpcStack:
+    Type: String
+    Description: Stack of VPC
+    Default: infra
+  VpcSubStack:
+    Type: String
+    Description: SubStack of VPC
+    Default: vpc
+  ReleaseVersion:
+    Type: String
+    Description: Release file name
+  ReleaseBucketPrefix:
+    Type: String
+    Description: Tier-less prefix of release bucket
+    Default: tablethotels-releases
+  LambdaHandler:
+    Type: String
+    Description: Function handler for Lambda function
+  CertificateArn:
+    Type: String
+    Description: Certificate ARN for API Deployment
+  DomainName:
+    Type: String
+    Description: The FQDN of the API deployed
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+            - apigateway.amazonaws.com
+            - events.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub "${Stack}-${SubStack}-${Tier}-Logging"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: !Sub "${Stack}-${SubStack}-${Tier}-LambdaInvoke"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+              - iam:PassRole
+            Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Stack}-${SubStack}-${Tier}"
+          - Effect: Allow
+            Action:
+            - EC2:CreateNetworkInterface
+            - EC2:DescribeNetworkInterfaces
+            - EC2:DeleteNetworkInterface
+            Resource: "*"
+          - Effect: Allow
+            Action:
+            - S3:GetObject
+            Resource: !Sub "arn:aws:s3:::${ReleaseBucketPrefix}-${Tier}/*"
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable traffic from private subnet
+      VpcId:
+        Fn::ImportValue: !Sub "${VpcStack}-${VpcSubStack}-${Tier}-VPCId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp:
+            Fn::ImportValue: !Sub "${VpcStack}-${VpcSubStack}-${Tier}-VPCCidr"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Stack}-${SubStack}-${Tier}-LambdaSecurityGroup"
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda Function
+      FunctionName: !Sub "${Stack}-${SubStack}-${Tier}"
+      Handler: !Ref LambdaHandler
+      Runtime:  python3.6
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 300
+      Code:
+        S3Bucket: !Sub "${ReleaseBucketPrefix}-${Tier}"
+        S3Key: !Sub "${Stack}-${SubStack}-${ReleaseVersion}.zip"
+      VpcConfig:
+        SecurityGroupIds:
+          - Ref: LambdaSecurityGroup
+        SubnetIds:
+          - Fn::ImportValue: !Sub "${VpcStack}-${VpcSubStack}-${Tier}-PublicASubnetId"
+          - Fn::ImportValue: !Sub "${VpcStack}-${VpcSubStack}-${Tier}-PublicBSubnetId"
+      Environment:
+        Variables:
+          STACK: !Ref Stack
+          SUBSTACK: !Ref SubStack
+          TIER: !Ref Tier
+      Tags:
+        - Key: Name
+          Value: !Sub "${Stack}-${SubStack}-${Tier}-LambdaFunction"
+    DependsOn:
+      - LambdaRole
+      - LambdaSecurityGroup
+  ApiGwMethod0:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      Integration:
+        CacheKeyParameters: []
+        CacheNamespace: none
+        Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LambdaRole}"
+        IntegrationHttpMethod: POST
+        IntegrationResponses: []
+        PassthroughBehavior: NEVER
+        Type: AWS_PROXY
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunction}/invocations"
+      MethodResponses: []
+      ResourceId: !GetAtt Api.RootResourceId
+      RestApiId: !Ref Api
+    DependsOn: Api
+  ApiGwMethod1:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: ANY
+      Integration:
+        CacheKeyParameters: []
+        CacheNamespace: none
+        Credentials: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LambdaRole}"
+        IntegrationHttpMethod: POST
+        IntegrationResponses: []
+        PassthroughBehavior: NEVER
+        Type: AWS_PROXY
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${LambdaFunction}/invocations"
+      MethodResponses: []
+      ResourceId: !Ref ResourceAnyPathSlashed
+      RestApiId: !Ref Api
+    DependsOn: Api
+  Api:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Description: Rest Api
+      Name: !Sub "${Stack}-${SubStack}-${Tier}"
+      BinaryMediaTypes:
+        - "*/*"
+      MinimumCompressionSize: 0
+  ResourceAnyPathSlashed:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: "{proxy+}"
+      RestApiId: !Ref Api
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref Api
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Tier
+      TracingEnabled: false
+      CacheClusterEnabled: false
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          DataTraceEnabled: false
+          CacheTtlInSeconds: 300
+          MetricsEnabled: false
+          LoggingLevel: "OFF"
+          CacheDataEncrypted: false
+    DependsOn:
+      - ApiDeployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref Api
+    DependsOn:
+      - Api
+      - ApiGwMethod0
+      - ApiGwMethod1
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Stack}-${SubStack}-${Tier}"
+      RetentionInDays: 90
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/*/*"
+  ApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      CertificateArn: !Ref CertificateArn
+      DomainName: !Ref DomainName
+  ApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref ApiDomainName
+      RestApiId: !Ref Api
+      Stage: !Ref ApiStage
+    DependsOn:
+      - ApiDomainName
+      - Api
+      - ApiStage
+  ApiDnsCname:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Ref DomainName
+      AliasTarget:
+        DNSName: !GetAtt ApiDomainName.DistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+      HostedZoneId:
+        Fn::ImportValue: !Sub "${VpcStack}-${VpcSubStack}-${Tier}-ExternalDnsZoneID"
+      Type: A
+    DependsOn:
+      - ApiBasePathMapping
+  LambdaKeepWarm:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Keeps Lambda Function Warm
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-LambdaKeepWarm"
+      ScheduleExpression: "rate(4 minutes)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt LambdaFunction.Arn
+          Id: !Sub "${Stack}-${SubStack}-${Tier}-LambdaFunction"
+          InputTransformer:
+            InputTemplate: "{\"time\": <time>, \"detail-type\": <detail-type>, \"source\": <source>,\"account\": <account>, \"region\": <region>,\"detail\": <detail>, \"version\": <version>,\"resources\": <resources>,\"id\": <id>,\"kwargs\": {}}"
+            InputPathsMap:
+              detail-type: "$.detail-type"
+              resources: "$.resources"
+              detail: "$.detail"
+              id: "$.id"
+              source: "$.source"
+              time: "$.time"
+              region: "$.region"
+              version: "$.version"
+              account: "$.account"
+  LambdaKeepWarmPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaKeepWarm.Arn
+Outputs:
+  LambdaRole:
+    Description: Lambda Role
+    Value: !Ref LambdaRole
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-LambdaRole"
+  LambdaFunction:
+    Description: Lambda Function
+    Value: !Ref LambdaFunction
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-LambdaFunction"
+  Api:
+    Description: Api
+    Value: !Ref Api
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-Api"
+  ApiStage:
+    Description: API Stage for deployment
+    Value: !Ref ApiStage
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-ApiStage"
+  ApiDeployment:
+    Description: API Deployment
+    Value: !Ref ApiDeployment
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-ApiDeployment"
+  LambdaLogGroup:
+    Description: Lambda Log Group
+    Value: !Ref LambdaLogGroup
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-LambdaLogGroup"

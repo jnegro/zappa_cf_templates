@@ -1,0 +1,355 @@
+---
+Description: Re-Useable VPC Template
+Parameters:
+  AZs:
+    Description: List of AZss used
+    Type: List<AWS::EC2::AvailabilityZone::Name>
+  CidrVpc:
+    Type: String
+    Description: The CidrBlock to use in VPC
+  InternalDnsZone:
+    Type: String
+    Description: Internal DNS Zone for VPC
+  ExternalDnsZone:
+    Type: String
+    Description: External DNS Zone for VPC
+  Stack:
+    Type: String
+    Description: Name of the application stack
+  SubStack:
+    Type: String
+    Description: Name of the application substack
+  Tier:
+    Type: String
+    Description: Tier of this application sub/stack
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+      CidrBlock: !Sub "${CidrVpc}.0.0/16"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Stack}-${SubStack}-${Tier}"
+  InternalDNS:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub "Hosted zone for ${InternalDnsZone}"
+      Name: !Ref InternalDnsZone
+      VPCs:
+      - VPCId: !Ref VPC
+        VPCRegion: !Ref AWS::Region
+  ExternalDNS:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub "Hosted subzone for ${ExternalDnsZone}"
+      Name: !Sub "${Tier}.r53.${ExternalDnsZone}"
+  PublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Sub "${CidrVpc}.0.0/24"
+      AvailabilityZone: !Select
+        - 0
+        - !Ref AZs
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PublicA"
+  PrivateA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Sub "${CidrVpc}.10.0/24"
+      AvailabilityZone: !Select
+        - 0
+        - !Ref AZs
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PrivateA"
+  PublicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Sub "${CidrVpc}.1.0/24"
+      AvailabilityZone: !Select
+        - 1
+        - !Ref AZs
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PublicB"
+  PrivateB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Sub "${CidrVpc}.11.0/24"
+      AvailabilityZone: !Select
+        - 1
+        - !Ref AZs
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PrivateB"
+  RouteTablePrivateA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-RouteTablePrivateA"
+  RouteTablePrivateB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-RouteTablePrivateB"
+  PrivateNatA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatIpA.AllocationId
+      SubnetId: !Ref PublicA
+      Tags:
+        - Key: Name
+          Value: !Sub "${Stack}-${SubStack}-${Tier}-PrivateNatA"
+    DependsOn:
+      - AttachGateway
+      - NatIpA
+      - PublicA
+  PrivateNatB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatIpB.AllocationId
+      SubnetId: !Ref PublicB
+      Tags:
+        - Key: Name
+          Value: !Sub "${Stack}-${SubStack}-${Tier}-PrivateNatB"
+    DependsOn:
+      - AttachGateway
+      - NatIpB
+      - PublicB
+  NatIpA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref VPC
+    DependsOn:
+      - InternetGateway
+      - AttachGateway
+      - VPC
+  NatIpB:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref VPC
+    DependsOn:
+      - InternetGateway
+      - AttachGateway
+      - VPC
+  SubnetRouteTableAssociationPrivateA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateA
+      RouteTableId: !Ref RouteTablePrivateA
+    DependsOn:
+      - RouteTablePrivateA
+      - PrivateA
+  SubnetRouteTableAssociationPrivateB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateB
+      RouteTableId: !Ref RouteTablePrivateB
+    DependsOn:
+      - RouteTablePrivateB
+      - PrivateB
+  PublicASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicA
+      RouteTableId: !Ref PublicRouteTable
+  PublicBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicB
+      RouteTableId: !Ref PublicRouteTable
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PublicRouteTable"
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+    - InternetGateway
+    - AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  RoutePrivateA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PrivateNatA
+    DependsOn:
+      - PrivateNatA
+      - PrivateA
+      - RouteTablePrivateA
+      - SubnetRouteTableAssociationPrivateA
+  RoutePrivateB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTablePrivateB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref PrivateNatB
+    DependsOn:
+      - PrivateNatB
+      - PrivateB
+      - RouteTablePrivateB
+      - SubnetRouteTableAssociationPrivateB
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-InternetGateway"
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PublicNetworkAcl"
+  PrivateNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${Stack}-${SubStack}-${Tier}-PrivateNetworkAcl"
+  PublicAllIn:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNetworkAcl
+      RuleNumber: '299'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: 0.0.0.0/0
+      Icmp:
+        Code: "-1"
+        Type: "-1"
+      Protocol: "-1"
+  PublicAllOut:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNetworkAcl
+      RuleNumber: '299'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      Icmp:
+        Code: "-1"
+        Type: "-1"
+      Protocol: "-1"
+  PrivateAllIn:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: '299'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: 0.0.0.0/0
+      Icmp:
+        Code: "-1"
+        Type: "-1"
+      Protocol: "-1"
+  PrivateAllOut:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNetworkAcl
+      RuleNumber: '299'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      Icmp:
+        Code: "-1"
+        Type: "-1"
+      Protocol: "-1"
+  PublicASubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicA
+      NetworkAclId: !Ref PublicNetworkAcl
+  PublicBSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicB
+      NetworkAclId: !Ref PublicNetworkAcl
+  PrivateASubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateA
+      NetworkAclId: !Ref PrivateNetworkAcl
+  PrivateBSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateB
+      NetworkAclId: !Ref PrivateNetworkAcl
+Outputs:
+  VPCId:
+    Description: VpcId of the newly created VPC
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-VPCId"
+  InternalDnsZoneID:
+    Description: local zone id
+    Value: !Ref InternalDNS
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-InternalDnsZoneID"
+  ExternalDnsZoneID:
+    Description: external zone id
+    Value: !Ref ExternalDNS
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-ExternalDnsZoneID"
+  PublicASubnetId:
+    Description: SubnetId of the newly created PublicA
+    Value: !Ref PublicA
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PublicASubnetId"
+  PublicBSubnetId:
+    Description: SubnetId of the newly created PublicB
+    Value: !Ref PublicB
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PublicBSubnetId"
+  PublicSubnetIds:
+    Description: List of Public Subnet IDs created
+    Value: !Sub "${PublicA},${PublicB}"
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PublicSubnetIds"
+  PrivateASubnetId:
+    Description: SubnetId of the newly created PrivateA
+    Value: !Ref PrivateA
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PrivateASubnetId"
+  PrivateBSubnetId:
+    Description: SubnetId of the newly created PrivateB
+    Value: !Ref PrivateB
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PrivateBSubnetId"
+  PrivateSubnetIds:
+    Description: List of Private Subnet IDs created
+    Value: !Sub "${PrivateA},${PrivateB}"
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-PrivateSubnetIds"
+  VPCCidr:
+    Description: VPC CIDR
+    Value: !Sub "${CidrVpc}.0.0/16"
+    Export:
+      Name: !Sub "${Stack}-${SubStack}-${Tier}-VPCCidr"
